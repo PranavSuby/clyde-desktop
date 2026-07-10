@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Clyde
+Comment=Local AI chat with smart routing
+Exec=/path/to/clyde-desktop/run.sh
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;Development;

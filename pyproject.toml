@@ -1,0 +1,23 @@
+[project]
+name = "clydesk"
+version = "0.1.0"
+description = "Clyde Desktop: a Claude-desktop-style app for local models with smart routing, multimodal chat, image generation, and deterministic skills"
+requires-python = ">=3.10"
+dependencies = [
+    "nicegui>=2.0",
+    "clyde @ git+https://github.com/PranavSuby/clyde",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
+    "sympy>=1.12",
+    "pywebview>=5.0",
+    "numpy>=1.26",
+    "ddgs>=9.0",
+    "faster-whisper>=1.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["clydesk*"]
