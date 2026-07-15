@@ -8,7 +8,6 @@ import shutil
 import subprocess
 
 import httpx
-
 from clyde.ollama_wire import parse_tool_calls, parse_usage
 from clyde.streaming import ThinkFilter
 

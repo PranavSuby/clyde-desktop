@@ -92,7 +92,7 @@ def index_folder(folder: str, on_progress=None) -> dict:
                 except (httpx.HTTPError, KeyError) as e:
                     return {"error": f"embedding failed: {e}",
                             "files": i, "chunks": n_chunks}
-                for chunk, vec in zip(batch, vectors):
+                for chunk, vec in zip(batch, vectors, strict=False):
                     conn.execute(
                         "INSERT INTO chunks (source, chunk, vector) VALUES (?,?,?)",
                         (fpath, chunk, array.array("f", vec).tobytes()),
@@ -147,7 +147,7 @@ def search(query: str, k: int = 5) -> list[dict]:
     for source, chunk, blob in rows:
         vec = array.array("f")
         vec.frombytes(blob)
-        dot = sum(a * b for a, b in zip(qvec, vec))
+        dot = sum(a * b for a, b in zip(qvec, vec, strict=False))
         vn = math.sqrt(sum(x * x for x in vec)) + 1e-8
         scored.append((dot / (qn * vn), source, chunk))
     scored.sort(reverse=True)

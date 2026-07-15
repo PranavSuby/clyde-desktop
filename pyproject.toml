@@ -5,7 +5,7 @@ description = "Clyde Desktop: a Claude-desktop-style app for local models with s
 requires-python = ">=3.10"
 dependencies = [
     "nicegui>=2.0",
-    "clyde @ git+https://github.com/PranavSuby/clyde",
+    "clyde @ git+https://github.com/PranavSuby/clyde@20e4ded29c7912bcfc981670486432bdb27f33b7",
     "httpx>=0.27",
     "aiosqlite>=0.20",
     "sympy>=1.12",
@@ -13,6 +13,15 @@ dependencies = [
     "numpy>=1.26",
     "ddgs>=9.0",
     "faster-whisper>=1.0",
+    "nh3>=0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.4",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
 ]
 
 [build-system]
@@ -21,3 +30,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["clydesk*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = ["E501", "B008"]

@@ -57,6 +57,10 @@ DEFAULT_CONFIG = {
         "height": 1024,
     },
     "max_tool_rounds": 5,
+    # Require the user to confirm before a "sensitive" skill runs (network
+    # egress, physical actuators). Defends against a model steered by injected
+    # instructions in tool/web content firing those skills unprompted.
+    "require_skill_approval": True,
 }
 
 

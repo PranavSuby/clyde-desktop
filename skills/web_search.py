@@ -16,6 +16,7 @@ SKILL = {
         "required": ["query"],
     },
     "timeout": 25,
+    "sensitive": True,  # reaches outside this process — gate behind approval
 }
 
 

@@ -86,10 +86,13 @@ def run(args: dict) -> str:
     env["pi"], env["E"], env["I"], env["oo"] = sympy.pi, sympy.E, sympy.I, sympy.oo
     env["x"], env["y"], env["z"] = sympy.symbols("x y z")
     try:
-        result = eval(  # noqa: S307 — input AST-validated above
+        # nosec B307 — the AST is allowlist-validated above (nodes, names,
+        # calls) and evaluated with empty __builtins__; see test_calculator_
+        # rejects_escapes for the escape-attempt coverage.
+        result = eval(  # noqa: S307
             compile(ast.parse(expr_str, mode="eval"), "<calc>", "eval"),
             {"__builtins__": {}}, env,
-        )
+        )  # nosec B307
     except Exception as e:
         return f"Error: {e}"
 

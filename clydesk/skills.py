@@ -43,7 +43,7 @@ def _child_run(path: str, args: dict, queue):
 
 class Skill:
     def __init__(self, name, description, parameters, fn, path,
-                 timeout=DEFAULT_TIMEOUT, in_process=False):
+                 timeout=DEFAULT_TIMEOUT, in_process=False, sensitive=False):
         self.name = name
         self.description = description
         self.parameters = parameters
@@ -53,6 +53,10 @@ class Skill:
         # in_process skills run on a worker thread in this process (needed
         # for skills that hold state or GPU models); no hard-kill on timeout.
         self.in_process = in_process
+        # sensitive skills reach outside this process (network egress, a
+        # physical actuator, ...). A model steered by injected instructions
+        # could fire these, so they go through user approval before running.
+        self.sensitive = sensitive
 
     def schema(self) -> dict:
         return {
@@ -133,6 +137,7 @@ def load_skills() -> tuple[dict[str, Skill], list[str]]:
                 path=path,
                 timeout=float(meta.get("timeout") or DEFAULT_TIMEOUT),
                 in_process=bool(meta.get("in_process")),
+                sensitive=bool(meta.get("sensitive")),
             )
         except Exception:
             errors.append(f"{fname}: {traceback.format_exc(limit=1).splitlines()[-1]}")

@@ -8,7 +8,6 @@ from clydesk import comfy, router, skills
 from clydesk.comfy import parse_tag_json
 from clydesk.ui_page import data_url
 
-
 # ---------------------------------------------------------------- router
 IMAGE_PROMPTS = [
     "draw me a picture of a fox",
@@ -269,6 +268,179 @@ def test_data_url_mime_detection():
     assert data_url("/9j/4AAQ").startswith("data:image/jpeg")
     assert data_url("iVBORw0").startswith("data:image/png")
     assert data_url("UklGRabc").startswith("data:image/webp")
+
+
+# ------------------------------------------------------- security hardening
+
+def _sensitive_orch(monkeypatch, script, cfg=None):
+    ollama = _FakeOllama(script)
+    orch = _orch_with(monkeypatch, ollama)
+    orch.cfg = {"max_tool_rounds": 5, **(cfg or {})}
+    # a fake sensitive skill that records if it ever ran
+    ran = {"count": 0}
+
+    async def fake_run_async(args):
+        ran["count"] += 1
+        return "ACTUATED"
+
+    sk = skills.Skill("bedroom_light", "d", {"type": "object"},
+                      lambda a: "ACTUATED", "/x", sensitive=True)
+    sk.run_async = fake_run_async
+    orch.skills = {"bedroom_light": sk}
+    return orch, ran
+
+
+def _light_call():
+    return [
+        [("tool_calls", [{"id": "1", "name": "bedroom_light",
+                          "arguments": {"action": "on"}}]),
+         ("done", {})],
+        [("text", "done"), ("done", {})],
+    ]
+
+
+def test_sensitive_skill_blocked_without_approver(monkeypatch):
+    orch, ran = _sensitive_orch(monkeypatch, _light_call())
+    messages = [{"role": "user", "content": "turn on the light"}]
+
+    async def go():
+        await orch._run_tool_loop("m", messages, [], lambda k, p: None)
+
+    asyncio.run(go())
+    assert ran["count"] == 0  # no approver → fail closed
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    assert "did not approve" in tool_msg["content"]
+
+
+def test_sensitive_skill_runs_when_approved(monkeypatch):
+    orch, ran = _sensitive_orch(monkeypatch, _light_call())
+    messages = [{"role": "user", "content": "turn on the light"}]
+
+    async def approver(name, args):
+        assert name == "bedroom_light" and args == {"action": "on"}
+        return True
+
+    async def go():
+        await orch._run_tool_loop("m", messages, [], lambda k, p: None,
+                                  approver)
+
+    asyncio.run(go())
+    assert ran["count"] == 1
+    assert next(m for m in messages if m["role"] == "tool")["content"] == "ACTUATED"
+
+
+def test_sensitive_skill_denied_by_approver(monkeypatch):
+    orch, ran = _sensitive_orch(monkeypatch, _light_call())
+    messages = [{"role": "user", "content": "x"}]
+
+    async def approver(name, args):
+        return False
+
+    async def go():
+        await orch._run_tool_loop("m", messages, [], lambda k, p: None,
+                                  approver)
+
+    asyncio.run(go())
+    assert ran["count"] == 0
+    assert "did not approve" in next(m for m in messages
+                                     if m["role"] == "tool")["content"]
+
+
+def test_approval_can_be_disabled_by_config(monkeypatch):
+    orch, ran = _sensitive_orch(monkeypatch, _light_call(),
+                                cfg={"require_skill_approval": False})
+    messages = [{"role": "user", "content": "x"}]
+
+    async def go():
+        await orch._run_tool_loop("m", messages, [], lambda k, p: None)
+
+    asyncio.run(go())
+    assert ran["count"] == 1  # gate off → runs even with no approver
+
+
+def test_nonsensitive_skill_never_prompts(monkeypatch):
+    ollama = _FakeOllama([
+        [("tool_calls", [{"id": "1", "name": "calculator",
+                          "arguments": {"expression": "2+2"}}]), ("done", {})],
+        [("text", "4"), ("done", {})],
+    ])
+    orch = _orch_with(monkeypatch, ollama)
+    called = {"approver": 0}
+
+    async def approver(name, args):
+        called["approver"] += 1
+        return False
+
+    messages = [{"role": "user", "content": "2+2"}]
+
+    async def go():
+        await orch._run_tool_loop("m", messages, [], lambda k, p: None,
+                                  approver)
+
+    asyncio.run(go())
+    assert called["approver"] == 0  # calculator is not sensitive
+    assert next(m for m in messages if m["role"] == "tool")["content"] == "4"
+
+
+def test_sensitive_flag_loaded_from_skill_meta():
+    loaded, _ = skills.load_skills()
+    assert loaded["fetch_page"].sensitive
+    assert loaded["web_search"].sensitive
+    assert not loaded["calculator"].sensitive
+
+
+def test_html_sanitizer_strips_xss():
+    from clydesk.sanitize import sanitize_html
+    dirty = ('<p>ok</p><script>alert(1)</script>'
+             '<img src=x onerror="steal()">'
+             '<a href="javascript:evil()">click</a>')
+    clean = sanitize_html(dirty)
+    assert "<script" not in clean.lower()
+    assert "onerror" not in clean.lower()
+    assert "javascript:" not in clean.lower()
+    assert "<p>ok</p>" in clean
+
+
+def test_html_sanitizer_keeps_markdown_output():
+    import markdown2
+
+    from clydesk.sanitize import sanitize_html
+    html = markdown2.markdown(
+        "# Title\n\n**bold** and `code`\n\n| a | b |\n|---|---|\n| 1 | 2 |",
+        extras=["fenced-code-blocks", "tables"])
+    clean = sanitize_html(html)
+    assert "<h1>" in clean and "<strong>" in clean
+    assert "<table>" in clean and "<code>" in clean
+
+
+@pytest.mark.parametrize("host,private", [
+    ("127.0.0.1", True),
+    ("localhost", True),
+    ("10.0.0.5", True),
+    ("192.168.1.1", True),
+    ("169.254.169.254", True),   # cloud metadata endpoint
+    ("::1", True),
+    ("0.0.0.0", True),
+    ("8.8.8.8", False),
+    ("93.184.216.34", False),    # example.com
+])
+def test_fetch_page_ssrf_classifier(host, private):
+    spec = importlib.util.spec_from_file_location(
+        "fp", os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                           "skills", "fetch_page.py"))
+    fp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fp)
+    assert fp._is_private_host(host) is private
+
+
+def test_fetch_page_rejects_internal_url():
+    spec = importlib.util.spec_from_file_location(
+        "fp2", os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                            "skills", "fetch_page.py"))
+    fp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fp)
+    out = fp.run({"url": "http://localhost:11434/api/tags"})
+    assert out.startswith("Error") and "SSRF" in out
 
 
 # ---------------------------------------------------------------- db

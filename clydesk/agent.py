@@ -86,16 +86,23 @@ class Orchestrator:
 
     # ------------------------------------------------------------------
     async def handle(self, chat_id: int, text: str, images_b64: list[str],
-                     on_event) -> None:
+                     on_event, approver=None) -> None:
         """Process one user message end to end. on_event(kind, payload) with
         kinds: route, thinking, text, status, images, error, done.
+
+        `approver` (optional async callable approve(skill_name, args) -> bool)
+        gates sensitive skills — network egress, actuators. When absent, or
+        when require_skill_approval is off, sensitive skills run unprompted
+        (headless/test use). See _exec_skill.
 
         Cancellation-safe: cancelling the task (Stop button) interrupts
         ComfyUI and still emits 'done'."""
         async with self._chat_locks[chat_id]:
-            await self._handle_locked(chat_id, text, images_b64, on_event)
+            await self._handle_locked(chat_id, text, images_b64, on_event,
+                                      approver)
 
-    async def _handle_locked(self, chat_id, text, images_b64, on_event):
+    async def _handle_locked(self, chat_id, text, images_b64, on_event,
+                             approver=None):
         route = None
         try:
             history = await db.get_messages(chat_id)
@@ -135,7 +142,7 @@ class Orchestrator:
                                          prev_tags=prev_tags)
             else:
                 await self._handle_chat(chat_id, text, images_b64, model,
-                                        route, on_event)
+                                        route, on_event, approver)
         except asyncio.CancelledError:
             if route == "image":
                 await asyncio.shield(self.comfy.interrupt())
@@ -215,7 +222,7 @@ class Orchestrator:
 
     async def _handle_chat(self, chat_id: int, text: str,
                            images_b64: list[str], model: str, route: str,
-                           on_event):
+                           on_event, approver=None):
         messages = await self._build_chat_messages(chat_id, route)
         # Proof-shaped questions: reinforce the Lean workflow for this turn so
         # even smaller models reliably formalize and verify instead of asserting.
@@ -229,7 +236,8 @@ class Orchestrator:
         full_text: list[str] = []
         extra = {"route": route, "model": model}
         try:
-            await self._run_tool_loop(model, messages, full_text, on_event)
+            await self._run_tool_loop(model, messages, full_text, on_event,
+                                      approver)
         except asyncio.CancelledError:
             # keep what already streamed so it survives a reload
             partial = "".join(full_text).strip()
@@ -264,7 +272,7 @@ class Orchestrator:
         return self._trim_for_context(messages)
 
     async def _run_tool_loop(self, model: str, messages: list[dict],
-                             sink: list[str], on_event) -> None:
+                             sink: list[str], on_event, approver=None) -> None:
         """Stream the model, execute any skill calls, and repeat until it
         answers with no tool calls (or the round budget runs out). Streamed
         text is appended to `sink` as it arrives so a cancel keeps the partial."""
@@ -297,13 +305,38 @@ class Orchestrator:
                              "content": "".join(round_text).strip(),
                              "tool_calls": tool_calls})
             for tc in tool_calls:
-                await self._exec_skill(tc, messages, on_event)
+                await self._exec_skill(tc, messages, on_event, approver)
         on_event(events.STATUS, "stopped after max tool rounds")
 
-    async def _exec_skill(self, tc: dict, messages: list[dict], on_event) -> None:
+    async def _approve_skill(self, skill, tc: dict, approver) -> bool:
+        """Decide whether a sensitive skill may run this turn.
+
+        require_skill_approval defaults on. With no approver wired (headless /
+        tests) a sensitive skill is blocked rather than run silently — the
+        safe default when nobody can answer."""
+        if not skill.sensitive:
+            return True
+        if not self.cfg.get("require_skill_approval", True):
+            return True
+        if approver is None:
+            return False
+        try:
+            return bool(await approver(tc["name"], tc.get("arguments") or {}))
+        except Exception:
+            return False
+
+    async def _exec_skill(self, tc: dict, messages: list[dict], on_event,
+                          approver=None) -> None:
         skill = self.skills.get(tc["name"])
-        result = (await skill.run_async(tc["arguments"]) if skill
-                  else f"Error: unknown tool {tc['name']}")
+        if skill is None:
+            result = f"Error: unknown tool {tc['name']}"
+        elif not await self._approve_skill(skill, tc, approver):
+            result = (f"Error: the user did not approve the sensitive skill "
+                      f"'{tc['name']}'. Do not retry; continue without it and "
+                      f"tell the user it needs their approval.")
+            on_event(events.STATUS, f"skill {tc['name']} — denied by user")
+        else:
+            result = await skill.run_async(tc["arguments"])
         on_event(events.STATUS, f"skill {tc['name']}"
                  f"({json.dumps(tc['arguments'])[:80]}) → {result[:120]}")
         messages.append({"role": "tool", "name": tc["name"], "content": result})

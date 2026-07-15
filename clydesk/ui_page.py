@@ -10,6 +10,17 @@ from nicegui import ui
 from . import db, events
 from .agent import Orchestrator
 from .config import load_config, save_config
+from .sanitize import sanitize_html
+
+
+def md(content: str = "", **kwargs):
+    """ui.markdown that sanitizes rendered HTML server-side.
+
+    Everything shown here — model output, stored history, web content the
+    model echoes — is untrusted; run our nh3 pass so an <img onerror>/<script>
+    payload can't reach the webview DOM. Explicit, not relying on NiceGUI's
+    client-side default."""
+    return ui.markdown(content, sanitize=sanitize_html, **kwargs)
 
 ROUTE_COLORS = {"chat": "primary", "code": "purple", "image": "pink",
                 "vision": "teal", "calc": "green"}
@@ -277,7 +288,7 @@ def build():
                         return
                     pull_progress.visible = True
                     try:
-                        async for status_text, pct in _orch.ollama.pull(name):
+                        async for _status_text, pct in _orch.ollama.pull(name):
                             if pct is not None:
                                 pull_progress.set_value(pct / 100)
                         ui.notify(f"pulled {name}")
@@ -330,7 +341,7 @@ def build():
                                 ui.image(data_url(b64)) \
                                     .classes("w-40 rounded")
                     if m["content"]:
-                        ui.markdown(m["content"])
+                        md(m["content"])
 
         async def load_chat(chat_id: int):
             if _blocked_while_busy():
@@ -394,6 +405,7 @@ def build():
 
         async def on_voice_audio(e):
             import base64 as b64mod
+
             from . import voice
             mic_btn.props("flat round color=default")
             state["recording"] = False
@@ -507,14 +519,14 @@ def build():
                         for b64 in images:
                             ui.image(data_url(b64)) \
                                 .classes("w-40 rounded")
-                ui.markdown(text)
+                md(text)
 
             with chat_area, ui.chat_message(name="Clyde").classes("w-full"):
                 badge = ui.badge("routing...").props("color=grey")
                 status = ui.label("").classes("text-xs text-gray-500")
-                thinking = ui.markdown("").classes(
+                thinking = md("").classes(
                     "text-xs text-gray-500 italic")
-                body = ui.markdown("")
+                body = md("")
                 img_row = ui.row()
             scroll_down()
 
@@ -566,10 +578,32 @@ def build():
                         f"{payload['prompt_tokens']} prompt · "
                         f"{payload['completion_tokens']} gen{pct}")
 
+            async def approve_skill(name: str, args: dict) -> bool:
+                # A sensitive skill (network egress / actuator) wants to run.
+                # Show what it would do and wait for the user's decision.
+                arg_str = ", ".join(f"{k}={v!r}" for k, v in (args or {}).items())
+                with ui.dialog() as confirm, ui.card().classes("min-w-[420px]"):
+                    ui.label("Allow this action?").classes("text-lg font-bold")
+                    ui.label(f"The assistant wants to run the “{name}” skill.") \
+                        .classes("text-sm")
+                    if arg_str:
+                        ui.label(arg_str).classes(
+                            "text-xs text-gray-500 font-mono break-all")
+                    ui.label("Only allow if you asked for something that needs "
+                             "it — tool or web content can try to trigger this.") \
+                        .classes("text-xs text-amber-500")
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("Deny", on_click=lambda: confirm.submit(False)) \
+                            .props("flat color=grey")
+                        ui.button("Allow", on_click=lambda: confirm.submit(True)) \
+                            .props("color=primary")
+                return bool(await confirm)
+
             is_first_exchange = len(await db.get_messages(state["chat_id"])) == 0
             try:
                 state["task"] = asyncio.create_task(
-                    _orch.handle(state["chat_id"], text, images, on_event))
+                    _orch.handle(state["chat_id"], text, images, on_event,
+                                 approver=approve_skill))
                 await state["task"]
                 if is_first_exchange:
                     asyncio.create_task(autotitle(state["chat_id"]))
