@@ -5,12 +5,14 @@
 """
 
 import argparse
+import os
+import secrets
 import sys
 
 from nicegui import app, ui
 
 from . import ui_page
-from .config import IMAGES_DIR
+from .config import DATA_DIR, IMAGES_DIR
 
 app.add_static_files("/images", IMAGES_DIR)
 ui_page.build()
@@ -29,10 +31,6 @@ def _storage_secret() -> str:
 
     Generated once and stored 0600 under the data dir; not a shared constant
     that could be forged."""
-    import os
-    import secrets
-
-    from .config import DATA_DIR
     path = os.path.join(DATA_DIR, "storage_secret")
     try:
         with open(path) as f:
@@ -41,9 +39,16 @@ def _storage_secret() -> str:
                 return val
     except OSError:
         pass
-    val = secrets.token_hex(32)
     os.makedirs(DATA_DIR, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    val = secrets.token_hex(32)
+    try:
+        # O_EXCL: if two instances start at once, only the first creates the
+        # file; the loser reads the winner's secret rather than clobbering it,
+        # so already-signed sessions stay verifiable.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        with open(path) as f:
+            return f.read().strip() or val
     with os.fdopen(fd, "w") as f:
         f.write(val)
     return val

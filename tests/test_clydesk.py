@@ -413,6 +413,15 @@ def test_html_sanitizer_keeps_markdown_output():
     assert "<table>" in clean and "<code>" in clean
 
 
+def _fetch_page_mod(tag="fp"):
+    spec = importlib.util.spec_from_file_location(
+        tag, os.path.join(os.path.dirname(os.path.dirname(__file__)),
+                          "skills", "fetch_page.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 @pytest.mark.parametrize("host,private", [
     ("127.0.0.1", True),
     ("localhost", True),
@@ -420,27 +429,57 @@ def test_html_sanitizer_keeps_markdown_output():
     ("192.168.1.1", True),
     ("169.254.169.254", True),   # cloud metadata endpoint
     ("::1", True),
+    ("::ffff:127.0.0.1", True),  # IPv4-mapped IPv6 loopback
+    ("2130706433", True),        # decimal-encoded 127.0.0.1
+    ("0177.0.0.1", True),        # octal-encoded 127.0.0.1
     ("0.0.0.0", True),
     ("8.8.8.8", False),
     ("93.184.216.34", False),    # example.com
 ])
 def test_fetch_page_ssrf_classifier(host, private):
-    spec = importlib.util.spec_from_file_location(
-        "fp", os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                           "skills", "fetch_page.py"))
-    fp = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fp)
-    assert fp._is_private_host(host) is private
+    assert _fetch_page_mod()._is_private_host(host) is private
 
 
 def test_fetch_page_rejects_internal_url():
-    spec = importlib.util.spec_from_file_location(
-        "fp2", os.path.join(os.path.dirname(os.path.dirname(__file__)),
-                            "skills", "fetch_page.py"))
-    fp = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(fp)
-    out = fp.run({"url": "http://localhost:11434/api/tags"})
+    out = _fetch_page_mod().run({"url": "http://localhost:11434/api/tags"})
     assert out.startswith("Error") and "SSRF" in out
+
+
+def _redirecting_fp(monkeypatch, location):
+    """fetch_page module whose opener 302s to `location`, and whose SSRF
+    classifier treats only loopback/link-local as private (no real DNS), so
+    the redirect re-vet path is exercised hermetically — offline-safe."""
+    import http.client
+    import urllib.error
+    import urllib.request
+
+    fp = _fetch_page_mod()
+    monkeypatch.setattr(fp, "_is_private_host",
+                        lambda h: h in ("localhost", "127.0.0.1")
+                        or h.startswith(("169.254.", "10.", "192.168.")))
+    hdrs = http.client.HTTPMessage()
+    hdrs["Location"] = location
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 302, "Found", hdrs, None)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: _Opener())
+    return fp
+
+
+def test_fetch_page_rejects_redirect_to_internal(monkeypatch):
+    fp = _redirecting_fp(monkeypatch, "http://169.254.169.254/latest/meta-data/")
+    # public host 302s to the cloud metadata endpoint; the target is re-vetted
+    # BEFORE its socket opens → blocked
+    out = fp.run({"url": "http://example.com/"})
+    assert out.startswith("Error") and "SSRF" in out
+
+
+def test_fetch_page_rejects_non_http_redirect(monkeypatch):
+    fp = _redirecting_fp(monkeypatch, "file:///etc/passwd")
+    out = fp.run({"url": "http://example.com/"})
+    assert out.startswith("Error") and "http(s)" in out
 
 
 # ---------------------------------------------------------------- db
